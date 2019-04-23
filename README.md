@@ -1,5 +1,3 @@
-# Hello World Example
+# touch screen test
 
-Starts a FreeRTOS task to print "Hello World"
-
-See the README.md file in the upper level 'examples' directory for more information about examples.
+Example to test the touch screen using esp-idf SPI. None of the SPI functions returns a value consistent with the Arduino test.
