@@ -1,32 +1,23 @@
-/* Hello World Example
-
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
-*/
-#include <stdio.h>
+#include "esp32-hal-spi.h"
+#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_system.h"
-#include "driver/spi_master.h"
-#include "string.h"
 
-#define MODDEF_XPT2046_WIDTH  240
-#define MODDEF_XPT2046_HEIGHT 320
+#define SS 16
+#define MISO 19
+#define MOSI 23 
+#define SCK 18
 
-#define PIN_NUM_CS 16
-#define PIN_NUM_MISO 19
-#define PIN_NUM_MOSI 23 
-#define PIN_NUM_CLK 18
+#define WIDTH 240
+#define HEIGHT 320
 
-#define Z_THRESHOLD 0
+#define min_x 250
+#define max_x 3600
 
-#define XMIN 250
-#define XMAX 3722
-#define YMIN 250
-#define YMAX 3760
+#define min_y 250
+#define max_y 3600
+
+//#define SPI_SETTING     SPISettings(2000000, MSBFIRST, SPI_MODE0)
 
 // bit 7 - start bit
 // bit 6-4 A2-A0 - Channel select bits
@@ -37,167 +28,130 @@
 #define CTRLZ2 0b11000011 		// 0xC3 = 195				// 11000011
 #define CTRLY  0b10010011 		// 0x93 = 147				// 10010011
 #define CTRLX  0b11010011 		// 0xD3 = 211				// 11010011
-#define CTRL_RESET 0b11010100	// 0xD4 = 212		    // 11010100
+#define CTRL_RESET 0b11010100	// 0xD4 = 212		        // 11010100
 
-esp_err_t ret;
-uint16_t x, y, z;
+spi_t * _spi;
+uint8_t _sck;
+uint8_t _miso;
+uint8_t _mosi;
+uint8_t _ss;
 
-uint16_t readValue1();
-uint16_t readValue2();
-uint16_t readValue3();
+int8_t _spi_num = VSPI;
+uint32_t _div;
+uint32_t _freq = 2000000;
+bool _inTransaction;
 
-spi_device_handle_t dev;
-spi_device_handle_t lcd_dev;
+const TickType_t xDelay = 500 / portTICK_PERIOD_MS;
 
-spi_bus_config_t buscfg={
-  .miso_io_num=PIN_NUM_MISO,
-  .mosi_io_num=PIN_NUM_MOSI,
-  .sclk_io_num=PIN_NUM_CLK,
-  .quadwp_io_num=-1,
-  .quadhd_io_num=-1
-};
+uint16_t readValue(uint8_t cmd);
+
+void begin(int8_t sck, int8_t miso, int8_t mosi, int8_t ss);
+void transfer(uint8_t * data, uint32_t size);
+void transferBytes(uint8_t * data, uint8_t * out, uint32_t size);
+void mapValues(uint16_t* x, uint16_t* y);
+
+void loop();
 
 void app_main()
 {
-  //Initialize the SPI bus
-
-  gpio_set_direction(PIN_NUM_CS, GPIO_MODE_OUTPUT);
-  gpio_set_level(PIN_NUM_CS, 1);
-  ret = spi_bus_initialize(VSPI_HOST, &buscfg, 0);
-  assert(ret == ESP_OK);
+  gpio_set_direction(SS, GPIO_MODE_OUTPUT);
+  gpio_set_level(SS, 1);
+  begin(SCK, MISO, MOSI, SS);
 
   while(1){
-    uint16_t x;
-    
-    x = readValue1(); // get the position
-    printf("Read1 x: %d", x);
-    x = readValue2(); // get the position
-    printf(", Read2 x: %d", x);
-    x = readValue3(); // get the position
-    printf(", Read3 x: %d\n", x);
-
-      /* Block */
-    const TickType_t xDelay = 500 / portTICK_PERIOD_MS;
-    vTaskDelay( xDelay );    
+      loop();
   }
 }
 
-// N.B. callers assume this function is synchronous - modSPITxRx
-// Send three bytes and receieve buffer is the transmit buffer
-uint16_t readValue1()
-{
-    spi_device_interface_config_t devcfg = {
-    .clock_speed_hz = 1000000,
-    .mode = 0,
-    .spics_io_num = PIN_NUM_CS,
-    .queue_size = 7,
-  };
+void loop() {
+ 
+  uint16_t z1 = readValue(CTRLZ1);
+  if(z1){
+    uint16_t x = readValue(CTRLX);
+    printf("pressed raw x: %d", x);
+
+    uint16_t y = readValue(CTRLY);
+    printf(", raw y: %d", x);
+
+    mapValues(&x, &y);
+
+    printf(", x: %d", x);
+    printf(", y: %d\n", y);
+
+  }
   
-  // Add the XPT2046
-  ret = spi_bus_add_device(VSPI_HOST, &devcfg, &dev);
-  assert(ret == ESP_OK);
+  vTaskDelay( xDelay );  
+}
 
-  uint8_t data[] = {CTRLX, 0 , 0};
-  
-  esp_err_t ret;
-	spi_transaction_t t;
+uint16_t readValue(uint8_t cmd){
 
-	memset(&t, 0, sizeof(t));
-	t.length = 8 * sizeof(data);
-	t.tx_buffer = &data;
+  uint8_t data[3];
+  data[0] = cmd;
+  data[1] = data[2] = 0;
 
-	t.rxlength = t.length;
-	t.rx_buffer = &data;
-
-	ret =  spi_device_transmit(dev, &t);
-  printf("Byte 0: %d, Byte 1: %d, Byte 2: %d\n", data[0], data[1], data[2]);
-	
-	if (0 > ret)
-		printf("problems sending spi message: ret: %d\n", ret);
-
-  ret = spi_bus_remove_device(dev);
-  assert(ret == ESP_OK);
+  gpio_set_level(SS, 0);
+  transfer((uint8_t*)&data, sizeof(data));
+  gpio_set_level(SS, 1);
 
   uint16_t val = (data[1] << 8 | data[2]) >> 3;
+//  printf("data[0]: %d, data[1]: %d, data[2]: %d\n", data[0], data[1], data[2]);
   return val;
 }
 
-// Send the command alone and read 2 bytes using half-duplex 
+void mapValues(uint16_t* x, uint16_t* y){
+    *x = (*x - min_x) * ((float)WIDTH) / (max_x - min_x);
+	*y = (*y - min_y) * ((float)HEIGHT) / (max_y - min_y);
 
-uint16_t readValue2(){
-
-  spi_device_interface_config_t devcfg = {
-    .clock_speed_hz = 1000000,
-    .mode = 0,
-    .spics_io_num = PIN_NUM_CS,
-    .queue_size = 7,
-    .flags = SPI_DEVICE_HALFDUPLEX,
-  };
-
-  // Add the XPT2046
-  ret = spi_bus_add_device(VSPI_HOST, &devcfg, &dev);
-  assert(ret == ESP_OK);
-
-  uint8_t data[1] = {CTRLX};
-
-  spi_transaction_t t = {
-    .length = 1 * 8,
-    .tx_buffer = &data,
-    .flags = SPI_TRANS_USE_RXDATA,
-    .rxlength = 16
-  };
-  
-  ret = spi_device_transmit(dev, &t);
-  assert(ret == ESP_OK);
-  uint16_t val = (t.rx_data[0] << 8 | t.rx_data[1]) >> 3;
-
-  //printf("Byte 0: %d, Byte 1: %d, Byte 2: %d", trans.rx_data[0], trans.rx_data[1], trans.rx_data[2]);
-  //printf(" val: %d\n", val);   
-
-  ret = spi_bus_remove_device(dev);
-  assert(ret == ESP_OK);
-  return val;
+	if (*x > (WIDTH - 1)) *x = WIDTH - 1;
+	if (*y > (HEIGHT - 1)) *y = HEIGHT - 1;
 }
 
-// Send the command alone and read 2 bytes using half-duplex 
-// Use command syntax
+void begin(int8_t sck, int8_t miso, int8_t mosi, int8_t ss){
+    if(_spi) {
+        return;
+    }
 
-uint16_t readValue3()
+    if(!_div) {
+        _div = spiFrequencyToClockDiv(_freq);
+    }
+
+    _spi = spiStartBus(_spi_num, _div, SPI_MODE0, SPI_MSBFIRST);
+    if(!_spi) {
+        return;
+    }
+
+    if(sck == -1 && miso == -1 && mosi == -1 && ss == -1) {
+        _sck = (_spi_num == VSPI) ? SCK : 14;
+        _miso = (_spi_num == VSPI) ? MISO : 12;
+        _mosi = (_spi_num == VSPI) ? MOSI : 13;
+        _ss = (_spi_num == VSPI) ? SS : 15;
+    } else {
+        _sck = sck;
+        _miso = miso;
+        _mosi = mosi;
+        _ss = ss;
+    }
+
+    spiAttachSCK(_spi, _sck);
+    spiAttachMISO(_spi, _miso);
+    spiAttachMOSI(_spi, _mosi);
+}
+
+void transfer(uint8_t * data, uint32_t size) 
+{ 
+	transferBytes(data, data, size); 
+}
+
+/**
+ * @param data uint8_t * data buffer. can be NULL for Read Only operation
+ * @param out  uint8_t * output buffer. can be NULL for Write Only operation
+ * @param size uint32_t
+ */
+void transferBytes(uint8_t * data, uint8_t * out, uint32_t size)
 {
-    /**
-     * Half duplex mode is not compatible with DMA when both writing and reading phases exist.
-     * try to use command and address field to replace the write phase.
-    */
-
-  spi_device_interface_config_t devcfg = {
-    .clock_speed_hz = 1000000,
-    .mode = 0,
-    .spics_io_num = PIN_NUM_CS,
-    .queue_size = 7,
-    .flags = SPI_DEVICE_HALFDUPLEX,
-    .command_bits = 8
-  };
-
-  // Add the XPT2046
-  ret = spi_bus_add_device(VSPI_HOST, &devcfg, &dev);
-  assert(ret == ESP_OK);
-
-  const uint8_t command = CTRLX;
-
-  spi_transaction_ext_t t = (spi_transaction_ext_t) {
-      .base = {
-          .flags = SPI_TRANS_VARIABLE_CMD | SPI_TRANS_USE_RXDATA,
-          .cmd = command,
-          .rxlength = 2 * 8, // Total data length received, in bits
-      },
-      .command_bits = 8,
-      .address_bits=0
-  };
-
-  assert(spi_device_transmit(dev, (spi_transaction_t *)&t) == ESP_OK);
-  ret = spi_bus_remove_device(dev);
-  assert(ret == ESP_OK);
-  //printf("Byte 0: %d, Byte 1: %d\n", t.base.rx_data[0], t.base.rx_data[1]);
-
-  return (t.base.rx_data[0] << 8 | t.base.rx_data[1]) >> 3;
+    if(_inTransaction){
+        return spiTransferBytesNL(_spi, data, out, size);
+    }
+    spiTransferBytes(_spi, data, out, size);
 }
+
