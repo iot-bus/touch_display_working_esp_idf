@@ -1,3 +1,4 @@
 # touch screen test
 
-Example to test the touch screen using esp-idf SPI. None of the SPI functions returns a value consistent with the Arduino test.
+This example now works using esp32-hal-spi from the esp32-arduino repo. Some minor mods necessary and 
+a few dependencies. Doesn't really need LOG.
